@@ -1,0 +1,250 @@
+---
+title: "Group Assignment"
+author:
+- Yasemin Ozturk
+- Wafa Mohamed
+- Mladen Mladenov
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: readable
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+    code_download: no
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+subtitle: Bayesian Multilevel Models
+---
+
+```{r setup, include = FALSE}
+options(max.print= 120,
+        width = 90,
+        tibble.width = 80)
+knitr::opts_chunk$set(echo= TRUE,
+                      cache=FALSE,
+                      prompt=FALSE,
+                      tidy="styler",
+                      comment=NA,
+                      message=FALSE,
+                      warning=TRUE)
+
+knitr::opts_knit$set(width=90)
+knitr::opts_chunk$set(cache.extra = knitr::rand_seed)
+set.seed(42)
+```
+
+# Group project {-}
+
+For the project, we use the following packages:
+
+```{r}
+library(dplyr)
+library(brms)
+library(ggplot2)
+library(tidyr)
+library(glue)
+library(ggrepel)
+library(priorsense)
+library(styler)
+library(brms)
+```
+
+## 1. Dataset Selection (1pt)
+Select a dataset with clusters such as schools, regions, or people with multiple observations per individual. (From for example, https://www.kaggle.com/) It would be a good idea to choose a smallish dataset (not too many rows, e.g., less than 1000) or subset it so that fitting the models doesn't take too long. 
+
+a. Describe the dataset with a couple of short sentences. What was its intended use? Are there papers that reference it? Provide information on how to obtain the dataset, including its source and any necessary preprocessing steps/feature engineering.
+
+> The dataset is downloaded from Kaggle [1]. It represents the average price per unit of Hass avocados (also per bag sold) and is intended to give an overview of how many avocados were sold in retailstores around the USA. It was inspired by the question whether there was a real 'avocadopocalype' in 2017, meaning an extreme rise in demand for avocados. The dataset can be used to look at differeces in price for different years and regions. It seems that there are no reference papers using this dataset, but in Kaggle it is used quite a lot for different purposes.
+
+> The original dataset consist of around 18000 rows and 14 columns. The data was collected weekly between 2015 and 2018 in different regions and cities in the USA. Because this is a large dataset, only the data for 2018 is used and the year & date columns are dropped. The region column consists of a mix of regions/states and their cities, so only the cities are selected and used. Some regions are concatenation of 2 cities, but are removed to avoid confusion. The avocados are seperated between sold in bulk and sold per bag (pre-packaged). The bulk avocados are divided into three sizes, represented by their PLU code. The columns of those are renamed into their sizes (small/medium, large, extra large). The 'Total.Bags' column is also removed, because it is just a sum of the three sizes of bags, same for 'Total.Volume' which is a sum of all the bulk and bag.
+
+> To use this data for fitting the models, we scaled all the variables in the dataset except the 'Average.Price' (target) and 'City' (clusters) columns. This is done so we don't have to define all the priors of each variables individually.
+
+```{r}
+dir <- "/Users/Yasemin/Desktop/Exercises BMM/"
+file <- 'avocado.csv'
+
+avocado <- read.csv(paste0(dir, file))
+
+avocado <- avocado %>% 
+  filter(year == 2018 & !region %in% c("California", "GreatLakes", "Midsouth", "NewOrleansMobile", "Northeast", "NorthernNewEngland", "PhoenixTucson", "Plains", "RaleighGreensboro", "RichmondNorfolk", "Roanoke", "SouthCarolina", "SouthCentral", "Southeast", "TotalUS", "West", "WestTexNewMexico")) %>%
+  select(!c(X, Date, year, Total.Bags, Total.Volume)) %>% 
+  rename(c('Small.Medium.Bulk' = X4046, 'Large.Bulk' = X4225, 'XLarge.Bulk' = X4770, 'City' = region, 'Type' = type, 'Average.Price' = AveragePrice)) %>%
+  mutate(Type = ifelse(Type == "conventional", 0, 1))
+
+s_avocado <- avocado %>%
+  select(!c(Average.Price, City)) %>%
+  scale() %>%
+  bind_cols(select(avocado, Average.Price, City))
+```
+
+b. Report its number of observations, columns (with their meaning) and their data types.
+
+> The subset of the data that we are going to use contains 12 columns with 888 observations. The meaning of the different columns are:
+1. Average Price (numeric): average price for a single avocado sold.
+2. Bulk - Small/Medium, Large, XLarge (numeric): number of avocados sold per size of bulk.
+3. Bags - Small, Large, XLarge (numeric): number of avocados sold per size of prepacked bags.
+4. Type (character): type of avocado, either organic (coded to 1) or conventional (coded to 0).
+4. City (character): different cities in the USA where the avocados were sold in retailstores.
+
+```{r}
+ncol(avocado)
+nrow(avocado)
+str(avocado)
+```
+
+## 2. Research Question (0.5pt)
+Formulate a research question that involves predicting a specific outcome variable based on the
+available dataset.
+
+> Research Goal: 
+Global demand for avocados has skyrocketed in recent years [2]. Part of this has been driven by a demand for a healthier lifestyle. However, this rise in demand also means an increase in prices. In order for households to be better prepared for the market and still be able to obtain their green goods, we are building a predictive model that checks what would the average price of an avocado be based on historical data.
+
+> Research Question: 
+Which model best predicts the average price of avocados in different US cities?
+
+## 3. Model Exploration (3pt)
+
+a. Fit multiple appropriate models to the dataset (as many models as there are members in the group, with a minimum of two models). Models might vary in the multilevel structure, informativeness of their priors (but not just trivial changes), model of the data/likelihood, etc. (I recommend not to use no pooling models since they tend to take a long time and it's very hard to assign good priors).
+
+```{r, message = FALSE}
+# Model 1: ignoring that there are different cities
+priors_model1 <- c(prior_string(glue("normal({mean(s_avocado$Average.Price)}, {2.5 * sd(s_avocado$Average.Price)})"), class = "Intercept"),
+                prior_string(glue("normal(0, {5 * sd(s_avocado$Average.Price)})"), 
+                             class = "b"),
+                prior_string(glue("exponential({ 1/sd(s_avocado$Average.Price)})"), 
+                             class = "sigma"))
+
+model_1 <- brm(Average.Price ~ Small.Medium.Bulk + Large.Bulk + XLarge.Bulk + Small.Bags + Large.Bags + XLarge.Bags * Type, 
+               data = s_avocado, 
+               seed = 123,
+               prior = priors_model1)
+plot(model_1)
+
+# Model 2:
+priors_model2 <-c(prior_string(glue("normal({mean(s_avocado$Average.Price)}, {2.5* sd(s_avocado$Average.Price)})"),
+                             class = "Intercept"),
+                prior_string(glue("normal(0, {2.5 * sd(s_avocado$Average.Price)})"), 
+                             class = "b"),
+                prior_string(glue("exponential({ 1/sd(s_avocado$Average.Price)})"), 
+                             class = "sigma"), 
+                prior_string(glue("exponential({1/sd(s_avocado$Average.Price)})"),   class = "sd"))
+
+model_2 <- brm(Average.Price ~ 1 + Small.Medium.Bulk + Large.Bulk + XLarge.Bulk + Small.Bags + Large.Bags + Large.Bags + XLarge.Bags +  Type + (1 | City), 
+               data  = s_avocado, 
+               family = gaussian(), 
+               seed = 123,
+               prior = priors_model2, 
+               control = list(adapt_delta = 0.9))
+plot(model_2)
+
+# Model 3:
+priors_model3 <- get_prior(Average.Price ~ 1 + . + (1 + Type || City) - City, data = s_avocado)
+
+model_3 <- brm(Average.Price ~ 1 + . + (1 + Type || City) - City,
+               data = s_avocado,
+               family = gaussian(),
+               seed = 123,
+               prior = priors_model3)
+plot(model_3)
+```
+
+b. Explain each model and describe its structure (what they assume about potential population-
+level or group-level effects), and the type of priors used. 
+
+> Model 1: Complete pooling (fixed effect) 
+Average.Price ~ Normal(alpha + Small.Medium.Bulk * beta + Large.Bulk * beta + XLarge.Bulk * beta + Small.Bags * beta + Large.Bags * beta + XLarge.Bags * beta + Type * beta)
+
+The first model is a complete pooling model, which ignores that there are different cities so assumes that there is no variation between the clusters. The model assumes that all the variables are part of the same group and have the same slope/intercept. So, this is our most simple model: one parameter represents all the data.
+
+> Model 2: Varying intercept
+Average.Price ~ Normal(alpha + City[n] + Small.Medium.Bulk * beta + Large.Bulk * beta + XLarge.Bulk * beta + Small.Bags * beta + Large.Bags * beta + XLarge.Bags * beta + Type * beta)
+
+This model assumes that each city has its own intercept (ui, i: indicating that each city is given a unique intercept), but the slope is the same for all cities, the intercept of the different cities has common prior distribution (normal distribution). This model also assumes that the outcome of the target variable average price is normally distributed around a mean with a some error. The sigma (overall variability) and the standard deviation (group level effect) have exponential ditribution, which will allow only positive values. 
+
+> Model 3: Varying intercept & varying slopes
+Average.Price ~ Normal(alpha + City[n] + Small.Medium.Bulk * (beta + City[n], beta) + Large.Bulk * (beta + City[n], beta) + XLarge.Bulk * (beta + City[n], beta) + Small.Bags * (beta + City[n], beta) + Large.Bags * (beta + City[n], beta) + XLarge.Bags * (beta + City[n], beta) + Type * (beta + City[n], beta))
+
+The model assumes that there is an underlying grouping between different cities and avocado prices. This makes sense since different cities are usually more or less expensive and their populations can have different purchasing parity. Furthermore, the intercept for different cities is also varying based on the type of avocado type - conventional vs organic. This also makes sense as the type can also affect the starting price of the product and since organic products tend to be priced higher. Finally, we regress over all of our features in the model to see if they all provide information.
+
+## 4. Model checking (2.5pt)
+
+a. Perform a prior sensitivity analysis for each model and modify or discard the model if
+appropriate. Justify.
+
+```{r}
+powerscale_sensitivity(model_1)
+powerscale_sensitivity(model_2)
+powerscale_sensitivity(model_3)
+```
+
+<!-- EXPLAIN CONCLUSIONS AND WHETHER MODELS ARE KEPT, MODIFIED OR DISCARDED -->
+> All models are not modified because the power-scaling sensitivity analysis that was conducted shows no prior-data conflict, which means that the function could not detect sensitivity to power scaling.
+
+b. Conduct posterior predictive checks for each model to assess how well they fit the data.
+Explain what you conclude.
+
+```{r}
+# Model 1:
+pp_check(model_1, ndraws = 200) 
+pp_check(model_1, type = "stat_2d")
+pp_check(model_1, type = "hist")
+
+# Model 2:
+pp_check(model_2, ndraws = 200)
+pp_check(model_2, type = "stat_2d") 
+pp_check(model_2, type = "hist") 
+
+# Model 3:
+pp_check(model_3, ndraws = 200)
+```
+
+<!-- EXPLAIN CONCLUSIONS -->
+> Model 1:
+The posterior predictive check shows that model 1 is fitting the data well. The predictive data looks similar to the observed data, which is shown in both the density plot and histogram. 
+
+> Model 2: 
+The posterior predictive checks of model 2 shows that this model is adequate to describe data/is fitting the data well because the shape (both the histogram and density plot) of the simulated samples look similar to the observed data. The statistics of the simulated samples also look similar to what was observed.  
+
+> Model 3: 
+After conducting a posterior predictive check we see that the model is somewhat underfitting our data, suggesting some level of model mis-specification. One reason could be the family used - the model should not be utilizing a Gaussian distribution family, since that would allow for negative values, which is not possible. More subtly, it will push some avocado prices closer to zero, whereas we know that avocado prices have risen in recent years, rather than decreased.
+
+## 5. Model Comparison (1.5pt)
+
+a. Use loo or k-fold cross-validation to compare the models.
+
+```{r}
+m1 <- loo(model_1, cores = 1, reloo = TRUE)
+m2 <- loo(model_2, cores = 1, reloo = TRUE)
+m3 <- loo(model_3, cores = 1, reloo = TRUE)
+loo_compare(m1, m2, m3)
+```
+b. Determine the best model based on predictive accuracy and justify your decision.
+<!-- DECISION -->
+> Model 3 gives the best results of the LOO comparison, following the second and lastly the first. 
+
+## 6. Interpretation of Important Parameters (1.5pt)
+
+Choose one of the best models and interpret its most important parameters in the context of
+the research question.
+
+<!-- INTERPRETATION AND MAYBE CODE GOES HERE -->
+```{r}
+posterior_summary(model_3)
+```
+> The intercept is positive, $1.43, considering all the other variabels are 0. The type 'organic' increases the price by $0.13, which is expected considering organic products are usually priced at a higher point. Depending on the city and type there is a lot of variability in price.
+
+# Contributions of each member 
+
+- Yasemin: Preprocessing, Chapter 1. Dataset Selection, Choosing models, Chapter 3. Model Exploration Model 1, Chapter 4. Model Checking Model 1, Chapter 5. Model Comparison & Chapter 6.
+- Wafa: Preprocessing, Chapter 1. Dataset Selection, Choosing models, Chapter 3. Model Exploration Model 2, Chapter 4. Model Checking Model 2, Chapter 5. Model Comparison & Chapter 6.
+- Mladen: Found data, Preprocessing, Chapter 2. Research Question, Chapter 3. Model Exploration Model 3, Chapter 4. Model Checking Model 3, Chapter 5. Model Comparison & Chapter 6.
+
+# References
+
+<!-- Complete if necessary -->
+[1] https://www.kaggle.com/datasets/neuromusic/avocado-prices 
+
+[2] https://www.statista.com/topics/3108/avocado-industry/#topicOverview
